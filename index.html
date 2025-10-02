@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mini MMORPG</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+    
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        
+        // Game state
+        let gameState = {
+            connected: false,
+            playerId: null,
+            players: {},
+            avatars: {},
+            viewport: { x: 0, y: 0 }
+        };
+        
+        // Constants
+        const WORLD_SIZE = 2048;
+        const SERVER_URL = 'wss://codepath-mmorg.onrender.com';
+        
+        // WebSocket connection
+        let ws = null;
+        
+        // Key state tracking
+        const keysPressed = {
+            ArrowUp: false,
+            ArrowDown: false,
+            ArrowLeft: false,
+            ArrowRight: false
+        };
+        
+        // Movement mapping
+        const keyToDirection = {
+            ArrowUp: 'up',
+            ArrowDown: 'down',
+            ArrowLeft: 'left',
+            ArrowRight: 'right'
+        };
+        
+        // Movement throttling
+        const MOVEMENT_INTERVAL = 100; // milliseconds between move commands
+        let lastMoveTime = 0;
+        
+        // Set canvas size to fill the browser window
+        function resizeCanvas() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            drawWorld();
+        }
+        
+        // Load and draw the world map
+        const worldImage = new Image();
+        worldImage.onload = function() {
+            drawWorld();
+        };
+        worldImage.src = 'world.jpg';
+        
+        // WebSocket connection and message handling
+        function connectToServer() {
+            console.log('Connecting to game server...');
+            ws = new WebSocket(SERVER_URL);
+            
+            ws.onopen = function() {
+                console.log('Connected to server');
+                joinGame();
+            };
+            
+            // This is IT. This is where the code listens to the server and 
+            // calls the handling function to operate on the message.
+            ws.onmessage = function(event) {
+                const message = JSON.parse(event.data);
+                handleServerMessage(message);
+            };
+            
+            ws.onclose = function() {
+                console.log('Disconnected from server');
+                gameState.connected = false;
+            };
+            
+            ws.onerror = function(error) {
+                console.error('WebSocket error:', error);
+            };
+        }
+        
+        // Send join game message
+        function joinGame() {
+            const joinMessage = {
+                action: 'join_game',
+                username: 'Mutrera'
+            };
+            ws.send(JSON.stringify(joinMessage));
+        }
+        
+        // Handle messages from server
+        function handleServerMessage(message) {
+            console.log('Received message:', message);
+            
+            switch (message.action) {
+                case 'join_game':
+                    if (message.success) {
+                        gameState.connected = true;
+                        gameState.playerId = message.playerId;
+                        gameState.players = message.players;
+                        gameState.avatars = message.avatars;
+                        
+                        // Load avatar images
+                        loadAvatarImages();
+                        
+                        // Center viewport on player
+                        updateViewport();
+                        
+                        console.log('Successfully joined game as player:', gameState.playerId);
+                        drawWorld();
+                    } else {
+                        console.error('Failed to join game:', message.error);
+                    }
+                    break;
+                    
+                case 'player_joined':
+                    gameState.players[message.player.id] = message.player;
+                    if (message.avatar) {
+                        gameState.avatars[message.avatar.name] = message.avatar;
+                        loadAvatarImage(message.avatar);
+                    }
+                    drawWorld();
+                    break;
+                    
+                case 'players_moved':
+                    Object.assign(gameState.players, message.players);
+                    updateViewport();
+                    drawWorld();
+                    break;
+                    
+                case 'player_left':
+                    delete gameState.players[message.playerId];
+                    drawWorld();
+                    break;
+                    
+                default:
+                    console.log('Unknown message type:', message.action);
+            }
+        }
+        
+        // Load avatar images from base64 data
+        function loadAvatarImages() {
+            for (const avatarName in gameState.avatars) {
+                loadAvatarImage(gameState.avatars[avatarName]);
+            }
+        }
+        
+        function loadAvatarImage(avatarData) {
+            avatarData.imageObjects = {};
+            
+            for (const direction in avatarData.frames) {
+                avatarData.imageObjects[direction] = [];
+                
+                for (let i = 0; i < avatarData.frames[direction].length; i++) {
+                    const img = new Image();
+                    img.src = avatarData.frames[direction][i];
+                    avatarData.imageObjects[direction].push(img);
+                }
+            }
+        }
+        
+        // Update viewport to center on player
+        function updateViewport() {
+            if (!gameState.playerId || !gameState.players[gameState.playerId]) return;
+            
+            const player = gameState.players[gameState.playerId];
+            
+            // Avatar size buffer (estimated avatar height/width for positioning)
+            const AVATAR_BUFFER = 100; // pixels
+            
+            // Center viewport on player
+            let targetViewportX = player.x - canvas.width / 2;
+            let targetViewportY = player.y - canvas.height / 2;
+            
+            // Constrain viewport to keep avatar visible within world boundaries
+            // Left boundary: ensure avatar doesn't go past left edge
+            gameState.viewport.x = Math.max(0, targetViewportX);
+            
+            // Right boundary: ensure avatar doesn't go past right edge
+            gameState.viewport.x = Math.min(WORLD_SIZE - canvas.width, gameState.viewport.x);
+            
+            // Top boundary: ensure avatar doesn't go past top edge
+            gameState.viewport.y = Math.max(0, targetViewportY);
+            
+            // Bottom boundary: ensure avatar doesn't go past bottom edge
+            gameState.viewport.y = Math.min(WORLD_SIZE - canvas.height, gameState.viewport.y);
+            
+            // Additional constraint: if the player is too close to world edges,
+            // adjust viewport to keep avatar fully visible
+            const playerScreenX = player.x - gameState.viewport.x;
+            const playerScreenY = player.y - gameState.viewport.y;
+            
+            // If avatar would be too close to screen edges, adjust viewport
+            if (playerScreenX < AVATAR_BUFFER && gameState.viewport.x > 0) {
+                gameState.viewport.x = Math.max(0, player.x - AVATAR_BUFFER);
+            }
+            if (playerScreenX > canvas.width - AVATAR_BUFFER && gameState.viewport.x < WORLD_SIZE - canvas.width) {
+                gameState.viewport.x = Math.min(WORLD_SIZE - canvas.width, player.x - canvas.width + AVATAR_BUFFER);
+            }
+            if (playerScreenY < AVATAR_BUFFER && gameState.viewport.y > 0) {
+                gameState.viewport.y = Math.max(0, player.y - AVATAR_BUFFER);
+            }
+            if (playerScreenY > canvas.height - AVATAR_BUFFER && gameState.viewport.y < WORLD_SIZE - canvas.height) {
+                gameState.viewport.y = Math.min(WORLD_SIZE - canvas.height, player.y - canvas.height + AVATAR_BUFFER);
+            }
+        }
+        
+        function drawWorld() {
+            if (!worldImage.complete) return;
+            
+            // Clear the canvas
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            // Draw the world map with viewport offset
+            ctx.drawImage(
+                worldImage,
+                gameState.viewport.x, gameState.viewport.y, canvas.width, canvas.height,
+                0, 0, canvas.width, canvas.height
+            );
+            
+            // Draw avatars if connected
+            if (gameState.connected) {
+                drawAvatars();
+            }
+        }
+        
+        // Draw all avatars
+        function drawAvatars() {
+            for (const playerId in gameState.players) {
+                const player = gameState.players[playerId];
+                drawAvatar(player);
+            }
+        }
+        
+        // Draw a single avatar
+        function drawAvatar(player) {
+            const avatarData = gameState.avatars[player.avatar];
+            if (!avatarData || !avatarData.imageObjects) return;
+            
+            // Calculate screen position
+            const screenX = player.x - gameState.viewport.x;
+            const screenY = player.y - gameState.viewport.y;
+            
+            // Skip if avatar is outside visible area
+            if (screenX < -100 || screenX > canvas.width + 100 || 
+                screenY < -100 || screenY > canvas.height + 100) {
+                return;
+            }
+            
+            // Get the correct avatar image
+            let direction = player.facing;
+            if (direction === 'west') {
+                direction = 'east'; // We'll flip it
+            }
+            
+            const frameImages = avatarData.imageObjects[direction];
+            if (!frameImages || frameImages.length === 0) return;
+            
+            const frameIndex = Math.min(player.animationFrame || 0, frameImages.length - 1);
+            const avatarImage = frameImages[frameIndex];
+            
+            if (!avatarImage.complete) return;
+            
+            ctx.save();
+            
+            // Flip horizontally for west direction
+            if (player.facing === 'west') {
+                ctx.scale(-1, 1);
+                ctx.drawImage(avatarImage, -screenX - avatarImage.width, screenY - avatarImage.height);
+            } else {
+                ctx.drawImage(avatarImage, screenX - avatarImage.width / 2, screenY - avatarImage.height);
+            }
+            
+            ctx.restore();
+            
+            // Draw username label
+            drawUsernameLabel(player, screenX, screenY);
+        }
+        
+        // Draw username label above avatar
+        function drawUsernameLabel(player, screenX, screenY) {
+            ctx.save();
+            
+            // Set text style
+            ctx.font = '14px Arial';
+            ctx.fillStyle = 'white';
+            ctx.strokeStyle = 'black';
+            ctx.lineWidth = 2;
+            ctx.textAlign = 'center';
+            
+            // Calculate label position (above avatar)
+            const labelY = screenY - 60;
+            
+            // Draw text with outline
+            ctx.strokeText(player.username, screenX, labelY);
+            ctx.fillText(player.username, screenX, labelY);
+            
+            ctx.restore();
+        }
+        
+        // Movement functions
+        function sendMoveCommand(direction) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                const moveMessage = {
+                    action: 'move',
+                    direction: direction
+                };
+                ws.send(JSON.stringify(moveMessage));
+            }
+        }
+        
+        function sendStopCommand() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                const stopMessage = {
+                    action: 'stop'
+                };
+                ws.send(JSON.stringify(stopMessage));
+            }
+        }
+        
+        // Keyboard event handlers
+        function handleKeyDown(event) {
+            // Only handle arrow keys
+            if (!keyToDirection[event.code]) return;
+            
+            // Prevent default browser behavior (scrolling)
+            event.preventDefault();
+            
+            // If key wasn't already pressed, mark it and send move command
+            if (!keysPressed[event.code]) {
+                keysPressed[event.code] = true;
+                sendMoveCommand(keyToDirection[event.code]);
+            }
+        }
+        
+        function handleKeyUp(event) {
+            // Only handle arrow keys
+            if (!keyToDirection[event.code]) return;
+            
+            // Prevent default browser behavior
+            event.preventDefault();
+            
+            // Mark key as released
+            if (keysPressed[event.code]) {
+                keysPressed[event.code] = false;
+                
+                // Check if any movement keys are still pressed
+                const anyKeyPressed = Object.values(keysPressed).some(pressed => pressed);
+                
+                // If no movement keys are pressed, send stop command
+                if (!anyKeyPressed) {
+                    sendStopCommand();
+                }
+            }
+        }
+        
+        // Game loop for continuous movement
+        function gameLoop() {
+            const currentTime = Date.now();
+            
+            // Only send move commands if enough time has passed
+            if (currentTime - lastMoveTime >= MOVEMENT_INTERVAL) {
+                // Check if any keys are pressed
+                const anyKeyPressed = Object.values(keysPressed).some(pressed => pressed);
+                
+                if (anyKeyPressed) {
+                    // Send move commands for all currently pressed keys
+                    for (const [key, pressed] of Object.entries(keysPressed)) {
+                        if (pressed) {
+                            sendMoveCommand(keyToDirection[key]);
+                        }
+                    }
+                    lastMoveTime = currentTime;
+                }
+            }
+            
+            // Continue the loop
+            requestAnimationFrame(gameLoop);
+        }
+        
+        // Event listeners
+        window.addEventListener('resize', resizeCanvas);
+        window.addEventListener('keydown', handleKeyDown);
+        window.addEventListener('keyup', handleKeyUp);
+        
+        // Initial setup
+        resizeCanvas();
+        
+        // Connect to server
+        connectToServer();
+        
+        // Start game loop
+        gameLoop();
+    </script>
+</body>
+</html>
